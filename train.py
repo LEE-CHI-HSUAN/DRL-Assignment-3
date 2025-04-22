@@ -91,7 +91,9 @@ class ScaledFloatFrame(gym.ObservationWrapper):
     def observation(self, observation):
         # careful! This undoes the memory optimization, use
         # with smaller replay buffers only.
-        return np.array(observation).astype(np.float32) / 255.0
+        ret = np.array(observation).astype(np.float32) / 255.0
+        ret = np.transpose(ret, (2, 0, 1))
+        return np.expand_dims(ret, 0)
 
 
 class LazyFrames(object):
@@ -106,7 +108,7 @@ class LazyFrames(object):
 
     def _force(self):
         if self._out is None:
-            self._out = np.concatenate(self._frames, axis=-1)
+            self._out = np.concatenate(self._frames, axis=-3)
             self._frames = None
         return self._out
 
@@ -198,13 +200,11 @@ class ConvQNet(nn.Module):
 
         self.cnn_base = nn.Sequential(
             # Input: (Batch*SeqLen, C, H, W) e.g. (Batch*SeqLen, 1, 84, 84) if grayscale
-            nn.Conv2d(
-                input_channels, 32, kernel_size=8, stride=4
-            ),  # (Batch*SeqLen, 32, 20, 20)
+            nn.Conv2d(input_channels, 32, kernel_size=8, stride=4), # (Batch*SeqLen, 32, 20, 20)
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),  # (Batch*SeqLen, 64, 9, 9)
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),             # (Batch*SeqLen, 64, 9, 9)
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),  # (Batch*SeqLen, 64, 7, 7)
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),             # (Batch*SeqLen, 64, 7, 7)
             nn.ReLU(),
             nn.Flatten(),  # Flatten the output for the next layer
         )
@@ -280,9 +280,7 @@ class DQNVariant:
         self.width = width
 
         self.q_net = ConvQNet(input_channels, height, width, action_size).to(device)
-        self.target_net = ConvQNet(input_channels, height, width, action_size).to(
-            device
-        )
+        self.target_net = ConvQNet(input_channels, height, width, action_size).to(device)
         self.target_net.load_state_dict(self.q_net.state_dict())
         self.target_net.eval()
 
@@ -297,29 +295,19 @@ class DQNVariant:
         # Add an experience to the replay buffer
         self.replay_buffer.add(state, action, reward, next_state, done)
 
-    def process_input(self, state):
-        """
-        (height, width, channel) -> (1 [batch], channel, height, width)
-        """
-        ret = np.transpose(state, (2, 0, 1))
-        return np.expand_dims(ret, 0)
-
     def get_action(self, state, deterministic=True):
         # Implement the action selection
         if deterministic:
             with torch.no_grad():
-                return self.q_net(state).max(1).indices.item()
+                state_np = np.array(state) # list -> array -> tensor
+                return self.q_net(state_np).max(1).indices.item()
         else:
             return random.randint(0, self.action_size - 1)
 
     def update(self):
         # Implement hard update or soft update
-        for q_param, target_param in zip(
-            self.q_net.parameters(), self.target_net.parameters()
-        ):
-            target_param.data.copy_(
-                self.TAU * q_param.data + (1 - self.TAU) * target_param.data
-            )
+        for q_param, target_param in zip(self.q_net.parameters(), self.target_net.parameters()):
+            target_param.data.copy_(self.TAU * q_param.data + (1 - self.TAU) * target_param.data)
 
     def train(self):
         # Sample a batch from the replay buffer
@@ -334,13 +322,10 @@ class DQNVariant:
 
         # Compute TD-target
         with torch.no_grad():
-            # Improvement 2
             # get the best next action if not done
             next_actions_b = self.q_net(next_states_b).max(1).indices
             # get the state-action values from target net
-            next_q_values = self.target_net(next_states_b).gather(
-                1, next_actions_b.unsqueeze(1)
-            )
+            next_q_values = self.target_net(next_states_b).gather(1, next_actions_b.unsqueeze(1))
             target_q_values = rewards_b + self.gamma * next_q_values * (1 - dones_b)
 
         # Compute loss and update the model
@@ -379,7 +364,6 @@ reward_history = []  # Store the total rewards for each episode
 max_score = 0
 for episode in range(num_episodes):
     state = env.reset()
-    state = agent.process_input(state)
     total_reward = 0
     far = 0
     # epsilon = max(epsilon * epsilon_decay, epsilon_end)
@@ -395,7 +379,6 @@ for episode in range(num_episodes):
 
         # Take a step in the environment
         next_state, reward, done, info = env.step(action)
-        next_state = agent.process_input(next_state)
 
         # Add the experience to the replay buffer and train the agent
         agent.add(state, action, reward, next_state, done)
@@ -411,7 +394,7 @@ for episode in range(num_episodes):
 
         if done:
             break
-        print(f"\r[{t}] eps= {epsilon:.2f}, x: {info['x_pos']}, y: {info['y_pos']}", end='   ')
+        # print(f"\r[{t}] eps= {epsilon:.2f}, x: {info['x_pos']}, y: {info['y_pos']}", end='   ')
         far = max(far, info["x_pos"])
 
     print(
@@ -435,6 +418,4 @@ for episode in range(num_episodes):
 
 from datetime import datetime
 
-torch.save(
-    agent.q_net.state_dict(), f"mario_net/dqn-{str(datetime.now())}.pth"
-)
+torch.save(agent.q_net.state_dict(), f"mario_net/dqn-{str(datetime.now())}.pth")
