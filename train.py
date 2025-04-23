@@ -183,6 +183,7 @@ env.observation_space
 # # DQN Agent
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
@@ -302,7 +303,14 @@ class DQNVariant:
                 state_np = np.array(state) # list -> array -> tensor
                 return self.q_net(state_np).max(1).indices.item()
         else:
-            return random.randint(0, self.action_size - 1)
+            # Boltzmann Exploration
+            with torch.no_grad():
+                state_np = np.array(state) # list -> array -> tensor
+                q_values = self.q_net(state_np) / 1  # a high tau means more randomness
+                probabilities = F.softmax(q_values, dim=1)
+                action = torch.multinomial(probabilities, num_samples=1).item()
+                return action
+            # return random.randint(0, self.action_size - 1)
 
     def update(self):
         # Implement hard update or soft update
@@ -414,8 +422,8 @@ for episode in range(num_episodes):
             f"\rEpisode {episode + 1}, Avg Reward: {avg_score:7.2f}, farest {far}",
             " " * 20,
         )
-        torch.save(agent.q_net.state_dict(), f"mario_net/ckpt-{episode + 1}.pth")
+        torch.save(agent.q_net.state_dict(), f"duel_ckpt/ckpt-{episode + 1}.pth")
 
 from datetime import datetime
 
-torch.save(agent.q_net.state_dict(), f"mario_net/dqn-{str(datetime.now())}.pth")
+torch.save(agent.q_net.state_dict(), f"duel_ckpt/dqn-{str(datetime.now())}.pth")
