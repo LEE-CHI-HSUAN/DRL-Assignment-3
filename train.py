@@ -227,6 +227,25 @@ class ConvQNet(nn.Module):
             nn.Linear(512, n_actions),
         )
 
+        # --- ICM components ---
+        self.feature_size = 512
+        self.feature = nn.Sequential(
+            self.cnn_base,
+            nn.Linear(self.cnn_output_size, self.feature_size),
+        )
+        
+        self.forward_net = nn.Sequential(
+            nn.Linear(n_actions + self.feature_size, 512),
+            nn.LeakyReLU(),
+            nn.Linear(512, self.feature_size)
+        )
+        
+        self.inverse_net = nn.Sequential(
+            nn.Linear(self.feature_size * 2, 512),
+            nn.LeakyReLU(),
+            nn.Linear(512, n_actions)
+        )
+
     def _get_cnn_output_size(self):
         """Helper function to calculate the CNN output size."""
         with torch.no_grad():
@@ -248,6 +267,20 @@ class ConvQNet(nn.Module):
         q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
 
         return q_values
+    
+    def icm_predict(self, state, next_state, action):
+        state_feature = self.feature(state)
+        next_state_feature = self.feature(next_state)
+
+        # get pred action
+        pred_action = torch.cat((state_feature, next_state_feature), 1)
+        pred_action = self.inverse_net(pred_action)
+
+        # get pred next state
+        pred_next_state_feature = torch.cat((state_feature, action), 1)
+        pred_next_state_feature = self.forward_net(pred_next_state_feature)
+
+        return next_state_feature, pred_next_state_feature, pred_action
 
 
 import random
@@ -322,11 +355,32 @@ class DQNVariant:
         batch = self.replay_buffer.sample(self.batch_size)  # Improvement 3
         # seperate batch into state, action, reward, next_state, done
         states_b, actions_b, rewards_b, next_states_b, dones_b = zip(*batch)
-        states_b = np.concatenate(states_b)
+        states_b = torch.tensor(np.concatenate(states_b), device=device, dtype=torch.float32)
+        next_states_b = torch.tensor(np.concatenate(next_states_b), device=device, dtype=torch.float32)
         actions_b = torch.tensor(actions_b, device=device).unsqueeze(1)
         rewards_b = torch.tensor(rewards_b, device=device).unsqueeze(1)
-        next_states_b = np.concatenate(next_states_b)
         dones_b = torch.tensor(dones_b, device=device, dtype=torch.float32).unsqueeze(1)
+
+        # Compute ICM
+        beta = 0.2 # acorrding to the paper
+        eta = 1 # scaling intrinsic reward
+        lamb = 1 # scaling q_net loss
+        # action one-hot vectors
+        action_onehot = F.one_hot(actions_b.squeeze(1), num_classes=self.action_size).float()
+        # get next-state embedding, predicted next-state embedding, predicted actions one-hot
+        next_state_feature, pred_next_state_feature, pred_action = self.q_net.icm_predict(
+            states_b, next_states_b, action_onehot
+        )
+
+        ce = nn.CrossEntropyLoss()
+        mse = nn.MSELoss()
+        # forward loss for curiosity
+        forward_loss = mse(pred_next_state_feature, next_state_feature)
+        # inverse loss for better prediction
+        inverse_loss = ce(pred_action, action_onehot)
+        # intrinsic reward
+        with torch.no_grad():
+            reward_i = eta * forward_loss.detach()
 
         # Compute TD-target
         with torch.no_grad():
@@ -334,12 +388,15 @@ class DQNVariant:
             next_actions_b = self.q_net(next_states_b).max(1).indices
             # get the state-action values from target net
             next_q_values = self.target_net(next_states_b).gather(1, next_actions_b.unsqueeze(1))
-            target_q_values = rewards_b + self.gamma * next_q_values * (1 - dones_b)
+            target_q_values = rewards_b + reward_i + self.gamma * next_q_values * (1 - dones_b)
 
         # Compute loss and update the model
         q_values = self.q_net(states_b).gather(1, actions_b)
-        loss = self.loss_fn(q_values, target_q_values)
+        q_loss = self.loss_fn(q_values, target_q_values)
+
+        # update
         self.optimizer.zero_grad()
+        loss = lamb * q_loss + (1 - beta) * inverse_loss + beta * forward_loss
         loss.backward()  # Improvement 3
         self.optimizer.step()
 
@@ -422,8 +479,8 @@ for episode in range(num_episodes):
             f"\rEpisode {episode + 1}, Avg Reward: {avg_score:7.2f}, farest {far}",
             " " * 20,
         )
-        torch.save(agent.q_net.state_dict(), f"duel_ckpt/ckpt-{episode + 1}.pth")
+        torch.save(agent.q_net.state_dict(), f"icm_ckpt/ckpt-{episode + 1}.pth")
 
 from datetime import datetime
 
-torch.save(agent.q_net.state_dict(), f"duel_ckpt/dqn-{str(datetime.now())}.pth")
+torch.save(agent.q_net.state_dict(), f"icm_ckpt/dqn-{str(datetime.now())}.pth")
