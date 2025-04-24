@@ -1,3 +1,4 @@
 mario_net/
-duel_ckpt
+duel_ckpt/
+icm_ckpt/
 **/*.pyc
