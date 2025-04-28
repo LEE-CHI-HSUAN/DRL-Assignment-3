@@ -49,6 +49,25 @@ class ConvQNet(nn.Module):
             nn.Linear(512, n_actions),
         )
 
+        # --- ICM components ---
+        self.feature_size = 512
+        self.feature = nn.Sequential(
+            self.cnn_base,
+            nn.Linear(self.cnn_output_size, self.feature_size),
+        )
+        
+        self.forward_net = nn.Sequential(
+            nn.Linear(n_actions + self.feature_size, 512),
+            nn.LeakyReLU(),
+            nn.Linear(512, self.feature_size)
+        )
+        
+        self.inverse_net = nn.Sequential(
+            nn.Linear(self.feature_size * 2, 512),
+            nn.LeakyReLU(),
+            nn.Linear(512, n_actions)
+        )
+
     def _get_cnn_output_size(self):
         """Helper function to calculate the CNN output size."""
         with torch.no_grad():
@@ -70,6 +89,20 @@ class ConvQNet(nn.Module):
         q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
 
         return q_values
+    
+    def icm_predict(self, state, next_state, action):
+        state_feature = self.feature(state)
+        next_state_feature = self.feature(next_state)
+
+        # get pred action
+        pred_action = torch.cat((state_feature, next_state_feature), 1)
+        pred_action = self.inverse_net(pred_action)
+
+        # get pred next state
+        pred_next_state_feature = torch.cat((state_feature, action), 1)
+        pred_next_state_feature = self.forward_net(pred_next_state_feature)
+
+        return next_state_feature, pred_next_state_feature, pred_action
 
 
 class Agent(object):
@@ -83,7 +116,7 @@ class Agent(object):
         self.width = width
 
         self.q_net = ConvQNet(input_channels, height, width, action_size).to(device)
-        self.q_net.load_state_dict(torch.load("duel_model.pth", map_location=device))
+        self.q_net.load_state_dict(torch.load("icm_model.pth", map_location=device))
         self.q_net.eval()
 
         self._obs_buffer = np.zeros((2,) + (240, 256, 3), dtype=np.uint8)
@@ -101,7 +134,7 @@ class Agent(object):
             # Boltzmann Exploration
             with torch.no_grad():
                 state_np = np.array(state) # list -> array -> tensor
-                q_values = self.q_net(state_np) / 1  # a high tau means more randomness
+                q_values = self.q_net(state_np) / 0.5  # a high tau means more randomness
                 probabilities = F.softmax(q_values, dim=1)
                 action = torch.multinomial(probabilities, num_samples=1).item()
                 return action
@@ -130,7 +163,7 @@ class Agent(object):
             max_frame = self._obs_buffer.max(axis=0)
             stacked_observation = self.format_observation(max_frame)
             # self.last_action = self.get_action(stacked_observation, deterministic=True)
-            if random.random() < 0.1:
+            if random.random() < 0.13:
                 self.last_action = self.get_action(stacked_observation, deterministic=False)
             else:
                 self.last_action = self.get_action(stacked_observation)
