@@ -364,7 +364,7 @@ class DQNVariant:
         # Compute ICM
         beta = 0.2 # acorrding to the paper
         eta = 1 # scaling intrinsic reward
-        lamb = 1 # scaling q_net loss
+        lamb = 0.2 # scaling q_net loss
         # action one-hot vectors
         action_onehot = F.one_hot(actions_b.squeeze(1), num_classes=self.action_size).float()
         # get next-state embedding, predicted next-state embedding, predicted actions one-hot
@@ -470,9 +470,6 @@ for episode in range(num_episodes):
 
     reward_history.append(total_reward)
     avg_score = np.mean(reward_history[-100:])
-    if avg_score > max_score:
-        max_score = avg_score
-        torch.save(agent.q_net.state_dict(), "MarioAgent.pth")
 
     if (episode + 1) % 100 == 0:
         print(
