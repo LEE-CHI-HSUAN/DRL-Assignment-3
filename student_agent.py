@@ -163,7 +163,7 @@ class Agent(object):
             max_frame = self._obs_buffer.max(axis=0)
             stacked_observation = self.format_observation(max_frame)
             # self.last_action = self.get_action(stacked_observation, deterministic=True)
-            if random.random() < 0.13:
+            if random.random() < 0.1:
                 self.last_action = self.get_action(stacked_observation, deterministic=False)
             else:
                 self.last_action = self.get_action(stacked_observation)
